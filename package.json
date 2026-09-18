@@ -1,0 +1,12 @@
+{
+  "name": "telnyx-ivr-webhook",
+  "version": "1.0.0",
+  "description": "Telnyx Voice API webhook for business IVR",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
