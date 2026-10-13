@@ -2,28 +2,29 @@
 const express = require("express");
 const multer = require("multer");
 const axios = require("axios");
+const FormData = require("form-data");
 const crypto = require("crypto");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const API_BASE = "https://api.zadarma.com";
 
-app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (!/\.(wav|mp3)$/i.test(file.originalname)) {
-      return cb(new Error("Only WAV or MP3 files are allowed."));
+      return cb(new Error("Only WAV and MP3 files are allowed."));
     }
     cb(null, true);
   }
 });
 
-// Health check
 app.get("/", (req, res) => {
-  res.status(200).send("Zadarma webhook is running!");
+  res.send("Zadarma webhook is running!");
 });
 
 // Zadarma webhook verification
@@ -31,205 +32,298 @@ app.get("/webhook", (req, res) => {
   if (req.query.zd_echo !== undefined) {
     return res.status(200).send(String(req.query.zd_echo));
   }
-
   res.status(200).send("Zadarma webhook endpoint is ready.");
 });
 
-// Zadarma event notifications
+// Call event notifications only; this route does not place calls.
 app.post("/webhook", (req, res) => {
   const event = req.body || {};
 
-  console.log("Zadarma event received:", {
+  console.log("Zadarma event:", {
     event: event.event,
     disposition: event.disposition,
     callback_dtmf: event.callback_dtmf,
     pbx_call_id: event.pbx_call_id
   });
 
-  if (String(event.callback_dtmf || "") === "1") {
-    console.log("Client pressed 1: verification confirmed.");
-  }
-
   res.status(200).send("OK");
 });
 
-// Protect diagnostic endpoints with a private token
+// Protect admin API routes with a private token.
 function checkToken(req, res, next) {
   const expected = process.env.UPLOAD_TEST_TOKEN;
   const supplied = req.get("authorization") || "";
 
   if (!expected) {
     return res.status(503).json({
-      error: "UPLOAD_TEST_TOKEN is not configured."
+      error: "UPLOAD_TEST_TOKEN is not configured in Render."
     });
   }
 
-  const expectedBuffer = Buffer.from("Bearer " + expected);
-  const suppliedBuffer = Buffer.from(supplied);
+  const a = Buffer.from("Bearer " + expected);
+  const b = Buffer.from(supplied);
 
-  if (
-    suppliedBuffer.length !== expectedBuffer.length ||
-    !crypto.timingSafeEqual(suppliedBuffer, expectedBuffer)
-  ) {
-    return res.status(401).json({ error: "Invalid test token." });
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return res.status(401).json({ error: "Invalid private token." });
   }
 
   next();
 }
 
-// Build Zadarma API signature
-function makeZadarmaSignature(method, params = {}) {
-  const paramsString = Object.keys(params)
+// Match PHP http_build_query(..., PHP_QUERY_RFC1738).
+function encodeParams(params) {
+  return Object.keys(params)
     .sort()
-    .map(
-      key =>
-        encodeURIComponent(key) +
-        "=" +
-        encodeURIComponent(String(params[key]))
-    )
-    .join("&")
-    .replace(/%20/g, "+");
+    .map(key => {
+      const encode = value =>
+        encodeURIComponent(String(value))
+          .replace(/[!'()*]/g, c =>
+            "%" + c.charCodeAt(0).toString(16).toUpperCase()
+          )
+          .replace(/%20/g, "+");
 
-  const md5 = crypto
-    .createHash("md5")
-    .update(paramsString)
-    .digest("hex");
+      return encode(key) + "=" + encode(params[key]);
+    })
+    .join("&");
+}
 
-  const signatureBase = method + paramsString + md5;
+// Keep the signature method that passed your read-only auth test.
+function makeSignature(method, params = {}) {
+  const query = encodeParams(params);
+  const md5 = crypto.createHash("md5").update(query).digest("hex");
+  const base = method + query + md5;
 
-  // HMAC-SHA1 hex output, then Base64-encode that hex string
   const hmacHex = crypto
     .createHmac("sha1", process.env.ZADARMA_API_SECRET)
-    .update(signatureBase)
+    .update(base)
     .digest("hex");
 
   return Buffer.from(hmacHex, "utf8").toString("base64");
 }
 
-// Browser page for the authentication test
-app.get("/admin/test-auth", (req, res) => {
-  res.type("html").send(`<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Zadarma API Test</title>
-</head>
-<body style="font:16px Arial;max-width:600px;margin:40px auto;padding:0 16px">
-<h2>Zadarma API Authentication Test</h2>
-<p>This read-only test checks the API balance endpoint.
-It does not place calls or upload audio.</p>
-<label>Private test token<br>
-<input id="token" type="password" autocomplete="off"
-style="box-sizing:border-box;width:100%;padding:12px;margin:8px 0">
-</label>
-<br>
-<button id="test" style="padding:12px 18px">Test API connection</button>
-<pre id="result" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
-<script>
-document.getElementById("test").addEventListener("click", async () => {
-  const token = document.getElementById("token").value;
-  const result = document.getElementById("result");
+function apiHeaders(method, params = {}) {
+  return {
+    Authorization:
+      process.env.ZADARMA_API_KEY + ":" + makeSignature(method, params)
+  };
+}
 
-  if (!token) {
-    result.textContent = "Enter your private test token.";
-    return;
-  }
-
-  result.textContent = "Checking Zadarma API...";
-
-  try {
-    const response = await fetch("/admin/test-auth", {
-      method: "POST",
-      headers: { "Authorization": "Bearer " + token }
+function checkCredentials(res) {
+  if (
+    !process.env.ZADARMA_API_KEY ||
+    !process.env.ZADARMA_API_SECRET
+  ) {
+    res.status(503).json({
+      error: "ZADARMA_API_KEY or ZADARMA_API_SECRET is missing in Render."
     });
-
-    const body = await response.json();
-    result.textContent = JSON.stringify(body, null, 2);
-  } catch (error) {
-    result.textContent = "Request failed. Check Render logs.";
+    return false;
   }
-});
-</script>
-</body>
-</html>`);
-});
+  return true;
+}
 
-// Read-only API authentication test
-app.post("/admin/test-auth", checkToken, async (req, res) => {
-  try {
-    const apiKey = process.env.ZADARMA_API_KEY;
-    const apiSecret = process.env.ZADARMA_API_SECRET;
-
-    if (!apiKey || !apiSecret) {
-      return res.status(503).json({
-        error: "Zadarma API credentials are missing."
-      });
-    }
-
-    const method = "/v1/info/balance/";
-    const signature = makeZadarmaSignature(method);
-
-    const response = await axios.get(
-      "https://api.zadarma.com" + method,
-      {
-        headers: {
-          Authorization: apiKey + ":" + signature
-        },
-        timeout: 15000
-      }
-    );
-
-    const data = response.data || {};
-
-    // Do not disclose account balance in the browser response
-    res.status(200).json({
-      message: "Zadarma API responded.",
-      status: data.status || "response_received"
-    });
-  } catch (err) {
-    console.error(
-      "Zadarma auth test failed:",
-      err.response?.status || err.message
-    );
-
-    res.status(502).json({
-      error: "Zadarma API test failed.",
-      httpStatus: err.response?.status || null,
-      zadarma: err.response?.data || undefined
-    });
-  }
-});
-
-// Keep audio uploads paused until authentication is verified
+// Admin page
 app.get("/admin/upload", (req, res) => {
   res.type("html").send(`<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Zadarma Audio Upload</title>
+<title>Zadarma Audio Admin</title>
 </head>
-<body style="font:16px Arial;max-width:600px;margin:40px auto;padding:0 16px">
-<h2>Zadarma IVR Audio Upload</h2>
-<p>Audio uploads are temporarily paused while API authentication is tested.</p>
-<p><a href="/admin/test-auth">Test Zadarma API connection first</a></p>
+<body style="font:16px Arial;max-width:650px;margin:35px auto;padding:0 16px">
+<h2>Zadarma IVR Audio Admin</h2>
+<p>Upload WAV or MP3 audio files (maximum 5 MB).</p>
+
+<label>Private test token
+<input id="token" type="password" autocomplete="off"
+style="box-sizing:border-box;width:100%;padding:10px;margin:8px 0">
+</label>
+
+<label>Audio file name
+<input id="audioName" value="Business Greeting"
+style="box-sizing:border-box;width:100%;padding:10px;margin:8px 0">
+</label>
+
+<label>Select audio file
+<input id="file" type="file" accept=".wav,.mp3,audio/wav,audio/mpeg"
+style="display:block;margin:12px 0">
+</label>
+
+<button id="upload" style="padding:10px">Upload audio</button>
+<button id="list" style="padding:10px">List uploaded sounds</button>
+<pre id="result" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+
+<script>
+const result = document.getElementById("result");
+
+async function request(path, options = {}) {
+  const token = document.getElementById("token").value;
+  if (!token) {
+    result.textContent = "Enter your private test token first.";
+    return;
+  }
+
+  result.textContent = "Please wait...";
+
+  try {
+    const response = await fetch(path, {
+      ...options,
+      headers: {
+        ...(options.headers || {}),
+        Authorization: "Bearer " + token
+      }
+    });
+
+    const body = await response.json();
+    result.textContent = JSON.stringify(body, null, 2);
+  } catch (e) {
+    result.textContent = "Request failed. Check Render logs.";
+  }
+}
+
+document.getElementById("upload").onclick = async () => {
+  const fileInput = document.getElementById("file");
+  const name = document.getElementById("audioName").value.trim();
+  const file = fileInput.files[0];
+
+  if (!name || !file) {
+    result.textContent = "Enter a name and choose an audio file.";
+    return;
+  }
+
+  const form = new FormData();
+  form.append("name", name);
+  form.append("file", file, file.name);
+
+  await request("/admin/upload", { method: "POST", body: form });
+};
+
+document.getElementById("list").onclick = async () => {
+  await request("/admin/sounds", { method: "GET" });
+};
+</script>
 </body>
 </html>`);
 });
 
-// Do not upload audio until authentication is confirmed
-app.post("/admin/upload", checkToken, upload.single("file"), (req, res) => {
-  res.status(409).json({
-    error: "Audio upload is paused. Test Zadarma API authentication first."
-  });
+// Read-only authentication test
+app.post("/admin/test-auth", checkToken, async (req, res) => {
+  if (!checkCredentials(res)) return;
+
+  try {
+    const method = "/v1/info/balance/";
+    const response = await axios.get(API_BASE + method, {
+      headers: apiHeaders(method),
+      timeout: 15000
+    });
+
+    res.json({
+      message: "Zadarma API responded.",
+      status: response.data?.status || "response_received"
+    });
+  } catch (err) {
+    console.error("Auth test failed:", err.response?.status || err.message);
+    res.status(502).json({
+      error: "Zadarma authentication test failed.",
+      httpStatus: err.response?.status || null,
+      zadarma: err.response?.data || null
+    });
+  }
 });
 
-// Handle invalid files and oversized uploads
+// Upload an IVR sound
+app.post(
+  "/admin/upload",
+  checkToken,
+  upload.single("file"),
+  async (req, res) => {
+    if (!checkCredentials(res)) return;
+
+    if (!req.file) {
+      return res.status(400).json({ error: "Choose a WAV or MP3 file." });
+    }
+
+    const name = String(req.body.name || "").trim();
+    if (!name) {
+      return res.status(400).json({ error: "Audio name is required." });
+    }
+
+    const method = "/v1/pbx/ivr/sounds/upload";
+    const params = { name };
+    const form = new FormData();
+
+    form.append("name", name);
+    form.append("file", req.file.buffer, {
+      filename: req.file.originalname,
+      contentType: req.file.mimetype
+    });
+
+    try {
+      const response = await axios.post(
+        API_BASE + method,
+        form,
+        {
+          headers: {
+            ...apiHeaders(method, params),
+            ...form.getHeaders()
+          },
+          maxBodyLength: 6 * 1024 * 1024,
+          timeout: 30000
+        }
+      );
+
+      res.status(200).json({
+        message: "Zadarma upload request completed.",
+        result: response.data
+      });
+    } catch (err) {
+      console.error(
+        "Zadarma upload failed:",
+        err.response?.status || err.message,
+        err.response?.data || ""
+      );
+
+      res.status(502).json({
+        error: "Zadarma audio upload failed.",
+        httpStatus: err.response?.status || null,
+        zadarma: err.response?.data || null
+      });
+    }
+  }
+);
+
+// List uploaded IVR sounds
+app.get("/admin/sounds", checkToken, async (req, res) => {
+  if (!checkCredentials(res)) return;
+
+  const method = "/v1/pbx/ivr/sounds/list";
+
+  try {
+    const response = await axios.get(API_BASE + method, {
+      headers: apiHeaders(method),
+      timeout: 15000
+    });
+
+    res.status(200).json({
+      message: "Zadarma sound list response.",
+      result: response.data
+    });
+  } catch (err) {
+    console.error("Sound list failed:", err.response?.status || err.message);
+
+    res.status(502).json({
+      error: "Could not retrieve Zadarma sound list.",
+      httpStatus: err.response?.status || null,
+      zadarma: err.response?.data || null
+    });
+  }
+});
+
+// Return readable errors for invalid/oversized files.
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
     return res.status(400).json({
-      error: "File is too large. Maximum size is 5 MB."
+      error: "File upload error. Maximum file size is 5 MB."
     });
   }
 
@@ -243,5 +337,5 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log("Server running on port " + PORT);
+  console.log("Zadarma server running on port " + PORT);
 });
