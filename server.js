@@ -2,7 +2,6 @@
 const express = require("express");
 const multer = require("multer");
 const axios = require("axios");
-const FormData = require("form-data");
 const crypto = require("crypto");
 
 const app = express();
@@ -15,8 +14,7 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const allowed = /\.(wav|mp3)$/i.test(file.originalname);
-    if (!allowed) {
+    if (!/\.(wav|mp3)$/i.test(file.originalname)) {
       return cb(new Error("Only WAV or MP3 files are allowed."));
     }
     cb(null, true);
@@ -55,7 +53,7 @@ app.post("/webhook", (req, res) => {
   res.status(200).send("OK");
 });
 
-// Check the private upload/test token
+// Protect diagnostic endpoints with a private token
 function checkToken(req, res, next) {
   const expected = process.env.UPLOAD_TEST_TOKEN;
   const supplied = req.get("authorization") || "";
@@ -79,8 +77,7 @@ function checkToken(req, res, next) {
   next();
 }
 
-// Build Zadarma API signature.
-// Parameters must be URL-encoded and sorted before signing.
+// Build Zadarma API signature
 function makeZadarmaSignature(method, params = {}) {
   const paramsString = Object.keys(params)
     .sort()
@@ -100,13 +97,16 @@ function makeZadarmaSignature(method, params = {}) {
 
   const signatureBase = method + paramsString + md5;
 
-  return crypto
+  // HMAC-SHA1 hex output, then Base64-encode that hex string
+  const hmacHex = crypto
     .createHmac("sha1", process.env.ZADARMA_API_SECRET)
     .update(signatureBase)
-    .digest("base64");
+    .digest("hex");
+
+  return Buffer.from(hmacHex, "utf8").toString("base64");
 }
 
-// Browser page for the read-only API test
+// Browser page for the authentication test
 app.get("/admin/test-auth", (req, res) => {
   res.type("html").send(`<!doctype html>
 <html>
@@ -117,7 +117,7 @@ app.get("/admin/test-auth", (req, res) => {
 </head>
 <body style="font:16px Arial;max-width:600px;margin:40px auto;padding:0 16px">
 <h2>Zadarma API Authentication Test</h2>
-<p>This checks your API connection using the balance endpoint.
+<p>This read-only test checks the API balance endpoint.
 It does not place calls or upload audio.</p>
 <label>Private test token<br>
 <input id="token" type="password" autocomplete="off"
@@ -137,11 +137,13 @@ document.getElementById("test").addEventListener("click", async () => {
   }
 
   result.textContent = "Checking Zadarma API...";
+
   try {
     const response = await fetch("/admin/test-auth", {
       method: "POST",
       headers: { "Authorization": "Bearer " + token }
     });
+
     const body = await response.json();
     result.textContent = JSON.stringify(body, null, 2);
   } catch (error) {
@@ -153,7 +155,7 @@ document.getElementById("test").addEventListener("click", async () => {
 </html>`);
 });
 
-// Read-only authentication test
+// Read-only API authentication test
 app.post("/admin/test-auth", checkToken, async (req, res) => {
   try {
     const apiKey = process.env.ZADARMA_API_KEY;
@@ -180,7 +182,7 @@ app.post("/admin/test-auth", checkToken, async (req, res) => {
 
     const data = response.data || {};
 
-    // Do not expose the account balance in the browser response.
+    // Do not disclose account balance in the browser response
     res.status(200).json({
       message: "Zadarma API responded.",
       status: data.status || "response_received"
@@ -199,8 +201,7 @@ app.post("/admin/test-auth", checkToken, async (req, res) => {
   }
 });
 
-// Keep the upload page available, but pause uploads until
-// API authentication has been confirmed.
+// Keep audio uploads paused until authentication is verified
 app.get("/admin/upload", (req, res) => {
   res.type("html").send(`<!doctype html>
 <html>
@@ -217,10 +218,10 @@ app.get("/admin/upload", (req, res) => {
 </html>`);
 });
 
-// Prevent another upload attempt until authentication is verified
+// Do not upload audio until authentication is confirmed
 app.post("/admin/upload", checkToken, upload.single("file"), (req, res) => {
   res.status(409).json({
-    error: "Audio upload is temporarily paused. Test Zadarma API authentication first."
+    error: "Audio upload is paused. Test Zadarma API authentication first."
   });
 });
 
