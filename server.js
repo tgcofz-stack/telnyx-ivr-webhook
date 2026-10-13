@@ -32,6 +32,7 @@ app.get("/webhook", (req, res) => {
   if (req.query.zd_echo !== undefined) {
     return res.status(200).send(String(req.query.zd_echo));
   }
+
   res.status(200).send("Zadarma webhook endpoint is ready.");
 });
 
@@ -49,7 +50,7 @@ app.post("/webhook", (req, res) => {
   res.status(200).send("OK");
 });
 
-// Protect admin API routes with a private token.
+// Protect administrative routes with a private token.
 function checkToken(req, res, next) {
   const expected = process.env.UPLOAD_TEST_TOKEN;
   const supplied = req.get("authorization") || "";
@@ -64,7 +65,9 @@ function checkToken(req, res, next) {
   const b = Buffer.from(supplied);
 
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    return res.status(401).json({ error: "Invalid private token." });
+    return res.status(401).json({
+      error: "Invalid private token."
+    });
   }
 
   next();
@@ -87,7 +90,7 @@ function encodeParams(params) {
     .join("&");
 }
 
-// Keep the signature method that passed your read-only auth test.
+// Keep the signature method that passed the read-only auth test.
 function makeSignature(method, params = {}) {
   const query = encodeParams(params);
   const md5 = crypto.createHash("md5").update(query).digest("hex");
@@ -118,7 +121,13 @@ function checkCredentials(res) {
     });
     return false;
   }
+
   return true;
+}
+
+// Normalize phone numbers for the test-number allowlist.
+function normalizePhone(value) {
+  return String(value || "").replace(/[\s()-]/g, "");
 }
 
 // Admin page
@@ -130,7 +139,8 @@ app.get("/admin/upload", (req, res) => {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Zadarma Audio Admin</title>
 </head>
-<body style="font:16px Arial;max-width:650px;margin:35px auto;padding:0 16px">
+<body style="font:16px Arial;max-width:700px;margin:35px auto;padding:0 16px">
+
 <h2>Zadarma IVR Audio Admin</h2>
 <p>Upload WAV or MP3 audio files (maximum 5 MB).</p>
 
@@ -138,6 +148,10 @@ app.get("/admin/upload", (req, res) => {
 <input id="token" type="password" autocomplete="off"
 style="box-sizing:border-box;width:100%;padding:10px;margin:8px 0">
 </label>
+
+<hr>
+
+<h3>Audio management</h3>
 
 <label>Audio file name
 <input id="audioName" value="Business Greeting"
@@ -151,13 +165,33 @@ style="display:block;margin:12px 0">
 
 <button id="upload" style="padding:10px">Upload audio</button>
 <button id="list" style="padding:10px">List uploaded sounds</button>
-<pre id="result" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+
+<hr>
+
+<h3>Test callback</h3>
+<p>
+This test can place a real call. Only the phone number configured in
+Render as TEST_CALLBACK_TO is allowed. Use your own number.
+</p>
+
+<label>Your test phone number (international format)
+<input id="testPhone" type="tel" placeholder="+855..."
+style="box-sizing:border-box;width:100%;padding:10px;margin:8px 0">
+</label>
+
+<button id="callback" style="padding:10px">
+Request test callback
+</button>
+
+<pre id="result"
+style="white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f4f4;padding:12px"></pre>
 
 <script>
 const result = document.getElementById("result");
 
 async function request(path, options = {}) {
   const token = document.getElementById("token").value;
+
   if (!token) {
     result.textContent = "Enter your private test token first.";
     return;
@@ -195,23 +229,51 @@ document.getElementById("upload").onclick = async () => {
   form.append("name", name);
   form.append("file", file, file.name);
 
-  await request("/admin/upload", { method: "POST", body: form });
+  await request("/admin/upload", {
+    method: "POST",
+    body: form
+  });
 };
 
 document.getElementById("list").onclick = async () => {
-  await request("/admin/sounds", { method: "GET" });
+  await request("/admin/sounds", {
+    method: "GET"
+  });
+};
+
+document.getElementById("callback").onclick = async () => {
+  const to = document.getElementById("testPhone").value.trim();
+
+  if (!to) {
+    result.textContent = "Enter your own test phone number.";
+    return;
+  }
+
+  if (!confirm(
+    "This requests a real callback to your test phone. Continue?"
+  )) {
+    return;
+  }
+
+  await request("/admin/test-callback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ to })
+  });
 };
 </script>
+
 </body>
 </html>`);
 });
 
-// Read-only authentication test
+// Read-only Zadarma authentication test
 app.post("/admin/test-auth", checkToken, async (req, res) => {
   if (!checkCredentials(res)) return;
 
   try {
     const method = "/v1/info/balance/";
+
     const response = await axios.get(API_BASE + method, {
       headers: apiHeaders(method),
       timeout: 15000
@@ -222,7 +284,11 @@ app.post("/admin/test-auth", checkToken, async (req, res) => {
       status: response.data?.status || "response_received"
     });
   } catch (err) {
-    console.error("Auth test failed:", err.response?.status || err.message);
+    console.error(
+      "Auth test failed:",
+      err.response?.status || err.message
+    );
+
     res.status(502).json({
       error: "Zadarma authentication test failed.",
       httpStatus: err.response?.status || null,
@@ -240,12 +306,17 @@ app.post(
     if (!checkCredentials(res)) return;
 
     if (!req.file) {
-      return res.status(400).json({ error: "Choose a WAV or MP3 file." });
+      return res.status(400).json({
+        error: "Choose a WAV or MP3 file."
+      });
     }
 
     const name = String(req.body.name || "").trim();
+
     if (!name) {
-      return res.status(400).json({ error: "Audio name is required." });
+      return res.status(400).json({
+        error: "Audio name is required."
+      });
     }
 
     const method = "/v1/pbx/ivr/sounds/upload";
@@ -309,10 +380,85 @@ app.get("/admin/sounds", checkToken, async (req, res) => {
       result: response.data
     });
   } catch (err) {
-    console.error("Sound list failed:", err.response?.status || err.message);
+    console.error(
+      "Sound list failed:",
+      err.response?.status || err.message
+    );
 
     res.status(502).json({
       error: "Could not retrieve Zadarma sound list.",
+      httpStatus: err.response?.status || null,
+      zadarma: err.response?.data || null
+    });
+  }
+});
+
+// Protected callback test. Only allows the phone number configured in
+// TEST_CALLBACK_TO. Set this to a phone you own before enabling tests.
+app.post("/admin/test-callback", checkToken, async (req, res) => {
+  if (!checkCredentials(res)) return;
+
+  const allowedPhone = normalizePhone(process.env.TEST_CALLBACK_TO);
+  const to = normalizePhone(req.body.to);
+
+  if (!allowedPhone) {
+    return res.status(503).json({
+      error: "Set TEST_CALLBACK_TO in Render to your own test phone number."
+    });
+  }
+
+  if (!/^\+?[1-9]\d{7,14}$/.test(to)) {
+    return res.status(400).json({
+      error: "Enter a valid international phone number."
+    });
+  }
+
+  if (to !== allowedPhone) {
+    return res.status(403).json({
+      error: "For safety, this endpoint only calls TEST_CALLBACK_TO."
+    });
+  }
+
+  // Configure this only after verifying the correct Zadarma PBX
+  // scenario identifier for the intended greeting-first call flow.
+  const callbackFrom = process.env.ZADARMA_CALLBACK_FROM;
+
+  if (!callbackFrom) {
+    return res.status(503).json({
+      error:
+        "Set ZADARMA_CALLBACK_FROM only after verifying the correct PBX scenario in Zadarma."
+    });
+  }
+
+  const method = "/v1/request/callback/";
+  const params = {
+    from: callbackFrom,
+    to,
+    predicted: "1"
+  };
+
+  try {
+    const response = await axios.get(API_BASE + method, {
+      params,
+      headers: apiHeaders(method, params),
+      timeout: 20000
+    });
+
+    res.status(200).json({
+      message: "Zadarma callback response received.",
+      result: response.data,
+      note:
+        "A successful API response does not prove that the greeting played or that DTMF routing works."
+    });
+  } catch (err) {
+    console.error(
+      "Callback test failed:",
+      err.response?.status || err.message,
+      err.response?.data || ""
+    );
+
+    res.status(502).json({
+      error: "Zadarma callback request failed.",
       httpStatus: err.response?.status || null,
       zadarma: err.response?.data || null
     });
