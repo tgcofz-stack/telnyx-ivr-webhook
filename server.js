@@ -32,11 +32,10 @@ app.get("/webhook", (req, res) => {
   if (req.query.zd_echo !== undefined) {
     return res.status(200).send(String(req.query.zd_echo));
   }
-
   res.status(200).send("Zadarma webhook endpoint is ready.");
 });
 
-// Call event notifications only; this route does not place calls.
+// Log Zadarma call events; does not control call routing.
 app.post("/webhook", (req, res) => {
   const event = req.body || {};
 
@@ -50,7 +49,7 @@ app.post("/webhook", (req, res) => {
   res.status(200).send("OK");
 });
 
-// Protect administrative routes with a private token.
+// Protect administrative endpoints.
 function checkToken(req, res, next) {
   const expected = process.env.UPLOAD_TEST_TOKEN;
   const supplied = req.get("authorization") || "";
@@ -73,7 +72,6 @@ function checkToken(req, res, next) {
   next();
 }
 
-// Match PHP http_build_query(..., PHP_QUERY_RFC1738).
 function encodeParams(params) {
   return Object.keys(params)
     .sort()
@@ -90,7 +88,7 @@ function encodeParams(params) {
     .join("&");
 }
 
-// Keep the signature method that passed the read-only auth test.
+// Preserve the signing method that passed the API connection test.
 function makeSignature(method, params = {}) {
   const query = encodeParams(params);
   const md5 = crypto.createHash("md5").update(query).digest("hex");
@@ -125,7 +123,6 @@ function checkCredentials(res) {
   return true;
 }
 
-// Normalize phone numbers for the test-number allowlist.
 function normalizePhone(value) {
   return String(value || "").replace(/[\s()-]/g, "");
 }
@@ -150,13 +147,6 @@ style="box-sizing:border-box;width:100%;padding:10px;margin:8px 0">
 </label>
 
 <hr>
-
-<h3>Test Zadarma API Connection</h3>
-<p>This is a read-only authentication test. It does not place a phone call.</p>
-<button id="testAuth" style="padding:10px">Test API Connection</button>
-
-<hr>
-
 <h3>Audio management</h3>
 
 <label>Audio file name
@@ -173,11 +163,15 @@ style="display:block;margin:12px 0">
 <button id="list" style="padding:10px">List uploaded sounds</button>
 
 <hr>
+<h3>Test Zadarma API connection</h3>
+<p>This test checks API authentication and does not place a call.</p>
+<button id="auth" style="padding:10px">Test API Connection</button>
 
+<hr>
 <h3>Test callback</h3>
 <p>
-This test can place a real call. Only the phone number configured in
-Render as TEST_CALLBACK_TO is allowed. Use your own number.
+This requests a real callback and may incur call charges.
+For safety, only the phone configured in Render as TEST_CALLBACK_TO is allowed.
 </p>
 
 <label>Your test phone number (international format)
@@ -185,9 +179,7 @@ Render as TEST_CALLBACK_TO is allowed. Use your own number.
 style="box-sizing:border-box;width:100%;padding:10px;margin:8px 0">
 </label>
 
-<button id="callback" style="padding:10px">
-Request test callback
-</button>
+<button id="callback" style="padding:10px">Request test callback</button>
 
 <pre id="result"
 style="white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f4f4;padding:12px"></pre>
@@ -221,11 +213,8 @@ async function request(path, options = {}) {
   }
 }
 
-// Read-only API authentication test; does not place a call.
-document.getElementById("testAuth").onclick = async () => {
-  await request("/admin/test-auth", {
-    method: "POST"
-  });
+document.getElementById("auth").onclick = async () => {
+  await request("/admin/test-auth", { method: "POST" });
 };
 
 document.getElementById("upload").onclick = async () => {
@@ -249,9 +238,7 @@ document.getElementById("upload").onclick = async () => {
 };
 
 document.getElementById("list").onclick = async () => {
-  await request("/admin/sounds", {
-    method: "GET"
-  });
+  await request("/admin/sounds", { method: "GET" });
 };
 
 document.getElementById("callback").onclick = async () => {
@@ -263,7 +250,7 @@ document.getElementById("callback").onclick = async () => {
   }
 
   if (!confirm(
-    "This requests a real callback to your test phone. Continue?"
+    "This requests a real callback to your test phone and may incur charges. Continue?"
   )) {
     return;
   }
@@ -275,7 +262,6 @@ document.getElementById("callback").onclick = async () => {
   });
 };
 </script>
-
 </body>
 </html>`);
 });
@@ -310,7 +296,7 @@ app.post("/admin/test-auth", checkToken, async (req, res) => {
   }
 });
 
-// Upload an IVR sound
+// Upload IVR audio to Zadarma
 app.post(
   "/admin/upload",
   checkToken,
@@ -343,18 +329,14 @@ app.post(
     });
 
     try {
-      const response = await axios.post(
-        API_BASE + method,
-        form,
-        {
-          headers: {
-            ...apiHeaders(method, params),
-            ...form.getHeaders()
-          },
-          maxBodyLength: 6 * 1024 * 1024,
-          timeout: 30000
-        }
-      );
+      const response = await axios.post(API_BASE + method, form, {
+        headers: {
+          ...apiHeaders(method, params),
+          ...form.getHeaders()
+        },
+        maxBodyLength: 6 * 1024 * 1024,
+        timeout: 30000
+      });
 
       res.status(200).json({
         message: "Zadarma upload request completed.",
@@ -406,8 +388,7 @@ app.get("/admin/sounds", checkToken, async (req, res) => {
   }
 });
 
-// Protected callback test. Only allows the phone number configured in
-// TEST_CALLBACK_TO. Set this to your own test phone before enabling tests.
+// Protected test callback: only to the number allowlisted in Render.
 app.post("/admin/test-callback", checkToken, async (req, res) => {
   if (!checkCredentials(res)) return;
 
@@ -432,21 +413,21 @@ app.post("/admin/test-callback", checkToken, async (req, res) => {
     });
   }
 
-  // Do not change this value until the intended PBX scenario is verified.
   const callbackFrom = process.env.ZADARMA_CALLBACK_FROM;
 
   if (!callbackFrom) {
     return res.status(503).json({
-      error:
-        "Set ZADARMA_CALLBACK_FROM only after verifying the correct PBX scenario in Zadarma."
+      error: "ZADARMA_CALLBACK_FROM is missing in Render."
     });
   }
 
   const method = "/v1/request/callback/";
+
+  // Intentionally omit predicted so Zadarma uses the normal callback order:
+  // call "from" first, then connect to "to" after the first side answers.
   const params = {
     from: callbackFrom,
-    to,
-    predicted: "1"
+    to
   };
 
   try {
@@ -459,8 +440,7 @@ app.post("/admin/test-callback", checkToken, async (req, res) => {
     res.status(200).json({
       message: "Zadarma callback response received.",
       result: response.data,
-      note:
-        "A successful API response does not prove that the greeting played or that DTMF routing works."
+      note: "API success does not confirm that the phone rang or that IVR/DTMF routing works."
     });
   } catch (err) {
     console.error(
@@ -477,7 +457,7 @@ app.post("/admin/test-callback", checkToken, async (req, res) => {
   }
 });
 
-// Return readable errors for invalid/oversized files.
+// Friendly errors for invalid or oversized uploads.
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
     return res.status(400).json({
