@@ -151,6 +151,12 @@ style="box-sizing:border-box;width:100%;padding:10px;margin:8px 0">
 
 <hr>
 
+<h3>Test Zadarma API Connection</h3>
+<p>This is a read-only authentication test. It does not place a phone call.</p>
+<button id="testAuth" style="padding:10px">Test API Connection</button>
+
+<hr>
+
 <h3>Audio management</h3>
 
 <label>Audio file name
@@ -214,6 +220,13 @@ async function request(path, options = {}) {
     result.textContent = "Request failed. Check Render logs.";
   }
 }
+
+// Read-only API authentication test; does not place a call.
+document.getElementById("testAuth").onclick = async () => {
+  await request("/admin/test-auth", {
+    method: "POST"
+  });
+};
 
 document.getElementById("upload").onclick = async () => {
   const fileInput = document.getElementById("file");
@@ -394,7 +407,7 @@ app.get("/admin/sounds", checkToken, async (req, res) => {
 });
 
 // Protected callback test. Only allows the phone number configured in
-// TEST_CALLBACK_TO. Set this to a phone you own before enabling tests.
+// TEST_CALLBACK_TO. Set this to your own test phone before enabling tests.
 app.post("/admin/test-callback", checkToken, async (req, res) => {
   if (!checkCredentials(res)) return;
 
@@ -419,8 +432,7 @@ app.post("/admin/test-callback", checkToken, async (req, res) => {
     });
   }
 
-  // Configure this only after verifying the correct Zadarma PBX
-  // scenario identifier for the intended greeting-first call flow.
+  // Do not change this value until the intended PBX scenario is verified.
   const callbackFrom = process.env.ZADARMA_CALLBACK_FROM;
 
   if (!callbackFrom) {
